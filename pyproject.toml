@@ -1,0 +1,20 @@
+[project]
+name = "tetrabot-sim"
+version = "0.0.1"
+description = "Isaac Sim asset and ArticulationCfg for the Capgemini TETRABot."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "trimesh",
+    "yourdfpy",
+]
+
+[project.optional-dependencies]
+mesh = [
+    "scipy",
+    "networkx",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

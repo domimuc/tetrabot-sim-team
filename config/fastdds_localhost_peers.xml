@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  FastDDS Profile — Localhost Unicast Discovery + UDP-Only
+  =========================================================
+
+  Erzwingt zwei Dinge auf jedem Teilnehmer-Init:
+    1) Initial Peer = 127.0.0.1 (Unicast-Discovery, kein Multicast nötig)
+    2) Builtin Transport = UDPv4 only (kein SHM, das über die Windows<->
+       WSL-Kernel-Grenze nicht funktioniert)
+
+  Beides ist nötig:
+    - Reines UDPv4-only ohne InitialPeer → Multicast scheitert leise
+      über mirrored networking.
+    - InitialPeer ohne UDPv4-only → SHM wird trotzdem versucht und
+      blockiert Discovery in einem Race.
+
+  Verwendung — auf BEIDEN Seiten gleiche Datei sourcen:
+    Windows (launch.bat):
+      set "FASTRTPS_DEFAULT_PROFILES_FILE=...\fastdds_localhost_peers.xml"
+    WSL (run_foxglove_bridge.sh):
+      export FASTRTPS_DEFAULT_PROFILES_FILE=/mnt/c/.../fastdds_localhost_peers.xml
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_v4_only</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="tetrabot_localhost_profile" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_v4_only</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+
+        <builtin>
+          <initialPeersList>
+            <locator>
+              <udpv4>
+                <address>127.0.0.1</address>
+              </udpv4>
+            </locator>
+          </initialPeersList>
+        </builtin>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

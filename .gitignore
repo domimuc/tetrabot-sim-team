@@ -1,0 +1,53 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.idea/
+.vscode/
+*.log
+logs/
+build/
+dist/
+*.egg-info/
+
+# Phase C (2026-05-11): private-repo hardening before initial push.
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.*
+*credentials*
+
+# Backup / stale files
+*.bak
+*.old
+*.orig
+~$*
+launch.bat.bak
+
+# Local scratch / diagnostic-run outputs
+reference/
+
+# Accidental stray file from a past shell command (literal name "v1.3.234)")
+v1.3.234)
+
+# Large CAD source files (we keep the converted .usd; .stp/.step are
+# original CATIA exports, multi-hundred-MB, and exceed GitHub's 100MB
+# per-file limit). assets/environment/A30X_AllCATPart.stp = 104MB.
+*.stp
+*.step
+*.STP
+*.STEP
+*.iges
+*.IGES
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# WebRTC livestream trace files (written to cwd by the kit streamer)
+*.etli
+NvStreamer-*

@@ -1,0 +1,447 @@
+<?xml version="1.0"?>
+<!--
+  TETRABot — MVP draft URDF
+  ==========================
+
+  Source documents:
+    - Explosionszeichnung_TETRABot_v04.pdf  (Thomas Stopp, 09.10.2023)
+    - ERD Engineering Horizons TETRABot.pdf (Matthias Kossow, 09.11.2022)
+
+  Coordinate convention: ROS REP-103 (x forward, y left, z up).
+  Robot origin: footprint center at ground level.
+
+  Mass budget (~20 kg total, EH Slide 6):
+    chassis_link       10.2 kg   (Main_Frame + Cover + Battery + Electronics + Interlock)
+    wheel_carrier_link  7.0 kg   (2× Lift Axle Assemblies, sans wheels)
+    4× wheel_*_link     0.5 kg ea = 2.0 kg total
+    camera_dome_link    0.8 kg
+
+  Open TODOs inline — tagged [CATIA] (waiting on engineering),
+                              [USD]   (extractable from existing USDs),
+                              [ENG]   (needs answer from team).
+-->
+<robot name="tetrabot">
+
+  <!-- ============================================================== -->
+  <!--  ROOT (chassis merged into base_link, 2026-05-08 v3 refactor)   -->
+  <!--                                                                -->
+  <!--  Previous architecture used the IsaacLab Ridgeback pattern:    -->
+  <!--  3 planar Dummy-Prismatic-Joints (base_x/y/yaw_joint) that     -->
+  <!--  abstracted Mecanum into 3 actuators on top of an empty        -->
+  <!--  base_link → chassis_link chain. With fix_base=False (Gravity-  -->
+  <!--  Fix) plus a world-Z-lock external joint, the planar drives    -->
+  <!--  showed only 4–25% X-tracking due to constraint-coupling       -->
+  <!--  between the max-coord world-Z-lock and the reduced-coord      -->
+  <!--  articulation root (telemetry-confirmed 2026-05-08 16:00).     -->
+  <!--                                                                -->
+  <!--  This refactor merges chassis_link into base_link as the       -->
+  <!--  single dynamic root, removes the planar dummy chain, and      -->
+  <!--  delegates Mecanum-style holonomic motion to direct velocity-  -->
+  <!--  control on the articulation root (set_world_velocities) in    -->
+  <!--  launch.py. The world-Z-lock is removed; gravity + wheel-      -->
+  <!--  ground contact handle Z stability naturally.                   -->
+  <!--                                                                -->
+  <!--  Articulation now has 5 joints (lift_joint + 4× wheel) instead -->
+  <!--  of 8. dof_names accordingly shrinks.                          -->
+  <!-- ============================================================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- Chassis aggregated mass: Main_Frame + Cover + Battery +
+           Electronics + Interlock. Identical to the old chassis_link. -->
+      <mass value="10.2"/>
+      <origin xyz="0 0 0.18"/>
+      <inertia ixx="0.155" iyy="0.178" izz="0.179" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual name="chassis_only_visual">
+      <origin xyz="0 0 0.077" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/chassis_only.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="tetrabot_white">
+        <color rgba="0.92 0.92 0.94 1"/>
+      </material>
+    </visual>
+    <!-- chassis collision REMOVED (2026-05-11 14:00 structural split per
+         user request). chassis (= base_link in URDF v3) and cover are
+         now treated as TWO SEPARATE bodies: cover_link (added below) is
+         RIGID and blocks at pallet edge. base_link (the chassis itself
+         with its front protrusion in chassis_only.stl visual) is NOT
+         RIGID — its visual extends forward of the cover bbox into the
+         pocket, but no collision means no impulses or blocking. The
+         protrusion is visible-only engagement. -->
+  </link>
+
+  <!-- chassis_link is kept as a tf-only alias of base_link so existing
+       launch.py paths like `{robot_path}/chassis_link` keep working.
+       Zero mass, no collision, no visual; just a fixed-joint anchor. -->
+  <link name="chassis_link"/>
+  <joint name="chassis_link_alias" type="fixed">
+    <parent link="base_link"/>
+    <child  link="chassis_link"/>
+    <origin xyz="0 0 0"/>
+  </joint>
+
+  <!-- ============================================================== -->
+  <!--  COVER (separate rigid body, 2026-05-11 14:00 user request)     -->
+  <!--                                                                -->
+  <!--  Per user: "mache das cover als rigid object und die chassis    -->
+  <!--  nicht. dadurch dass das cover drüberliegt, könntest du das     -->
+  <!--  rigid machen, und die chassis auch, die hat ja den vorsprung." -->
+  <!--                                                                -->
+  <!--  cover.stl is the outer shell (per filename, separate from      -->
+  <!--  chassis_only.stl which contains the chassis + front protrusion).-->
+  <!--  Cover gets a box collision matching the original chassis bbox —-->
+  <!--  this is what blocks the bot at the pallet edge. The chassis    -->
+  <!--  visual (chassis_only.stl on base_link) renders the protrusion  -->
+  <!--  visibly extending into the pocket beyond the cover boundary.   -->
+  <!-- ============================================================== -->
+  <link name="cover_link">
+    <inertial>
+      <mass value="0.5"/>
+      <origin xyz="0 0 0.20"/>
+      <inertia ixx="0.005" iyy="0.005" izz="0.005" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.077" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/cover.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="cover_white">
+        <color rgba="0.92 0.92 0.94 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.24"/>
+      <geometry>
+        <box size="0.345 0.304 0.16"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="cover_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="cover_link"/>
+    <origin xyz="0 0 0"/>
+  </joint>
+
+
+  <!-- ============================================================== -->
+  <!--  DOCKING UNIT (Interlock System per Capgemini DS 72)            -->
+  <!--                                                                -->
+  <!--  Reference: Explosionszeichnung_TETRABot_v04.pdf, slide 2      -->
+  <!--  ("Exploded Drawing — Tetrabot DS 000") and slide 3            -->
+  <!--  ("DS 002"). The Interlock System (DS 72) sits on the FRONT    -->
+  <!--  face of the bot — visible in slide 2 as a black panel with    -->
+  <!--  the "TETRABOT" label and 4× corner mounts (item 703). It is   -->
+  <!--  a flat docking-plate-style interface, NOT a forklift fork.    -->
+  <!--                                                                -->
+  <!--  Architecture per spec (2026-05-07, refined 2026-05-08):       -->
+  <!--    - Rigid body, FIXED to chassis_link                         -->
+  <!--    - Reposition: chassis-only.stl mesh's "front" face renders  -->
+  <!--      at URDF -X (CAD axis convention differs from URDF). Move  -->
+  <!--      docking origin from xyz=+0.30 to xyz=-0.30 so it appears  -->
+  <!--      on the visually-correct side. The d405 docking-camera     -->
+  <!--      comment is similarly affected but left for now (separate  -->
+  <!--      ticket).                                                  -->
+  <!--    - The existing lift_joint raises the chassis (and with it   -->
+  <!--      this fixed-jointed docking unit) when extended.           -->
+  <!--                                                                -->
+  <!--  Geometry: Box 0.25m × 0.10m × 0.06m, mass 0.7 kg              -->
+  <!-- ============================================================== -->
+
+  <link name="docking_unit">
+    <inertial>
+      <mass value="0.7"/>
+      <origin xyz="0 0 0"/>
+      <!-- Box 0.25 × 0.10 × 0.06, m=0.7 — diagonal inertia approximation -->
+      <inertia ixx="0.000805" iyy="0.003858" izz="0.004025"
+               ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <!-- docking_unit: tf-only anchor (2026-05-11 13:50 user feedback —
+         lift_central.stl was wrong CAD part). Visual + collision both
+         removed. Engagement is now visualised via the chassis_only.stl
+         protrusion sticking out forward of the cover bbox; cover_link
+         (added below) provides the rigid blocking. -->
+  </link>
+  <joint name="docking_mount_joint" type="fixed">
+    <parent link="chassis_link"/>
+    <child  link="docking_unit"/>
+    <!-- xyz=-0.30: front face of chassis (CAD orientation flips URDF +X
+         to back side per visual rendering of chassis_only.stl). -->
+    <origin xyz="-0.30 0 0.10"/>
+  </joint>
+
+
+  <!-- ============================================================== -->
+  <!--  LIFT MECHANISM                                                -->
+  <!--  Single prismatic, sync'd L/R (per design decision).           -->
+  <!--  Source: Explosionszeichnung Slide 9 (Lifting Unit)            -->
+  <!--    Aktuator:  Dynamixel XM430-W210-R                           -->
+  <!--    Kinematik: T8 Trapezgewindespindel, Pitch 2 mm              -->
+  <!--    Hub:       ~100 mm (EH Slide 6)                             -->
+  <!--                                                                -->
+  <!--  Convention: lift_joint > 0  →  wheels move DOWN in chassis     -->
+  <!--              frame  →  chassis rises in world frame.           -->
+  <!-- ============================================================== -->
+
+  <link name="wheel_carrier_link">
+    <inertial>
+      <!-- 2× Assembly Lift Axle + 4 Mecanum-Räder, jetzt aggregiert (9 kg) -->
+      <mass value="9.0"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.06" iyy="0.07" izz="0.05" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <!-- Two lift columns + central spindles, one per axle. Y=+/-0.5 is an
+         estimate for axle separation; iterate visually. -->
+    <visual name="lift_left">
+      <origin xyz="0 0.1 0.077" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/lift_central.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="wheel_black"><color rgba="0.18 0.18 0.18 1"/></material>
+    </visual>
+    <visual name="lift_right">
+      <origin xyz="0 -0.1 0.077" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/lift_central.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="wheel_black"><color rgba="0.18 0.18 0.18 1"/></material>
+    </visual>
+    <!-- Collision boxes for the two lift columns. Without these, only the
+         chassis box + wheel spheres collide; the side columns clipped
+         through the cabin curve in the user's screenshot. Approximate the
+         lift_central STL with a 0.06x0.06x0.30m vertical post per side. -->
+    <collision name="lift_left_col">
+      <origin xyz="0 0.1 0.18" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.06 0.06 0.30"/>
+      </geometry>
+    </collision>
+    <collision name="lift_right_col">
+      <origin xyz="0 -0.1 0.18" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.06 0.06 0.30"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="lift_joint" type="prismatic">
+    <parent link="chassis_link"/>
+    <child  link="wheel_carrier_link"/>
+    <origin xyz="0 0 0.05"/>
+    <axis xyz="0 0 -1"/>
+    <!-- TODO[CATIA]: confirm exact stroke; placeholder 0..0.10 m -->
+    <limit lower="0.0" upper="0.10" effort="4000" velocity="0.05"/>
+    <!-- TODO[ENG]: max velocity 0.05 m/s is rough; XM430 @ 30rpm + T8/2mm
+         pitch geometrically gives ~0.001 m/s — Datenblatt-Realität klären -->
+    <dynamics damping="50" friction="2"/>
+  </joint>
+
+
+  <!-- ============================================================== -->
+  <!--  MECANUM WHEELS (4×, visual-only continuous joints)            -->
+  <!--                                                                -->
+  <!--  Real rolling kinematics replaced by planar dummies above.     -->
+  <!--  These joints exist purely so wheels can spin visually.        -->
+  <!--                                                                -->
+  <!--  TODO[USD]: confirm wheelbase / track / wheel diameter         -->
+  <!--    placeholder: wheelbase 0.20 m  (front-back hub spacing)     -->
+  <!--                 track     0.27 m  (left-right hub spacing)     -->
+  <!--                 wheel dia 0.10 m                               -->
+  <!-- ============================================================== -->
+
+  <link name="wheel_fl_link">
+    <inertial>
+      <!-- mass aggregated into wheel_carrier_link; this link is now just a
+           continuous-joint anchor for completeness of the kinematic tree -->
+      <mass value="0.001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-6" iyy="1e-6" izz="1e-6" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <!-- wheel.stl is centered at its hub, oriented in CATIA. Apply the
+           same chassis-level rotation so it aligns with the rest. -->
+      <origin xyz="0 0 0" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/wheel.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="wheel_black"><color rgba="0.18 0.18 0.18 1"/></material>
+    </visual>
+    <!-- Wheel collision = sphere @ wheel hub, radius 0.05 m (10 cm wheel dia,
+         per URDF wheelbase comment). With fix_base=True the chassis can no
+         longer roll/pitch (planar kinematic chain only), so wheel-ground
+         friction no longer fights the drives. Spheres are simple, rotation-
+         symmetric, and sufficient for cabin floor edges + visual realism. -->
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_fl_joint" type="continuous">
+    <parent link="wheel_carrier_link"/>
+    <child  link="wheel_fl_link"/>
+    <origin xyz="0.068 0.1 0.0576"/>
+    <axis xyz="1 0 0"/>
+  </joint>
+
+  <link name="wheel_fr_link">
+    <inertial>
+      <!-- mass aggregated into wheel_carrier_link; this link is now just a
+           continuous-joint anchor for completeness of the kinematic tree -->
+      <mass value="0.001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-6" iyy="1e-6" izz="1e-6" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <!-- wheel.stl is centered at its hub, oriented in CATIA. Apply the
+           same chassis-level rotation so it aligns with the rest. -->
+      <origin xyz="0 0 0" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/wheel.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="wheel_black"><color rgba="0.18 0.18 0.18 1"/></material>
+    </visual>
+    <!-- Wheel collision = sphere @ wheel hub, radius 0.05 m (10 cm wheel dia,
+         per URDF wheelbase comment). With fix_base=True the chassis can no
+         longer roll/pitch (planar kinematic chain only), so wheel-ground
+         friction no longer fights the drives. Spheres are simple, rotation-
+         symmetric, and sufficient for cabin floor edges + visual realism. -->
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_fr_joint" type="continuous">
+    <parent link="wheel_carrier_link"/>
+    <child  link="wheel_fr_link"/>
+    <origin xyz="0.068 -0.1 0.0576"/>
+    <axis xyz="1 0 0"/>
+  </joint>
+
+  <link name="wheel_rl_link">
+    <inertial>
+      <!-- mass aggregated into wheel_carrier_link; this link is now just a
+           continuous-joint anchor for completeness of the kinematic tree -->
+      <mass value="0.001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-6" iyy="1e-6" izz="1e-6" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <!-- wheel.stl is centered at its hub, oriented in CATIA. Apply the
+           same chassis-level rotation so it aligns with the rest. -->
+      <origin xyz="0 0 0" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/wheel.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="wheel_black"><color rgba="0.18 0.18 0.18 1"/></material>
+    </visual>
+    <!-- Wheel collision = sphere @ wheel hub, radius 0.05 m (10 cm wheel dia,
+         per URDF wheelbase comment). With fix_base=True the chassis can no
+         longer roll/pitch (planar kinematic chain only), so wheel-ground
+         friction no longer fights the drives. Spheres are simple, rotation-
+         symmetric, and sufficient for cabin floor edges + visual realism. -->
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_rl_joint" type="continuous">
+    <parent link="wheel_carrier_link"/>
+    <child  link="wheel_rl_link"/>
+    <origin xyz="-0.068 0.1 0.0576"/>
+    <axis xyz="1 0 0"/>
+  </joint>
+
+  <link name="wheel_rr_link">
+    <inertial>
+      <!-- mass aggregated into wheel_carrier_link; this link is now just a
+           continuous-joint anchor for completeness of the kinematic tree -->
+      <mass value="0.001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-6" iyy="1e-6" izz="1e-6" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <!-- wheel.stl is centered at its hub, oriented in CATIA. Apply the
+           same chassis-level rotation so it aligns with the rest. -->
+      <origin xyz="0 0 0" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="../assets/meshes/visual/wheel.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="wheel_black"><color rgba="0.18 0.18 0.18 1"/></material>
+    </visual>
+    <!-- Wheel collision = sphere @ wheel hub, radius 0.05 m (10 cm wheel dia,
+         per URDF wheelbase comment). With fix_base=True the chassis can no
+         longer roll/pitch (planar kinematic chain only), so wheel-ground
+         friction no longer fights the drives. Spheres are simple, rotation-
+         symmetric, and sufficient for cabin floor edges + visual realism. -->
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_rr_joint" type="continuous">
+    <parent link="wheel_carrier_link"/>
+    <child  link="wheel_rr_link"/>
+    <origin xyz="-0.068 -0.1 0.0576"/>
+    <axis xyz="1 0 0"/>
+  </joint>
+
+
+  <!-- ============================================================== -->
+  <!--  SENSOR HEAD (Camera dome)                                     -->
+  <!--  Source: EH Slide 6 + Explosionszeichnung Slide 2              -->
+  <!--    D435i  (RGB-D + IMU, top)                                   -->
+  <!--    ZEDmini (stereo + 6DoF tracking, top)                       -->
+  <!--    D405   (docking, front-low)                                 -->
+  <!-- ============================================================== -->
+
+  <link name="camera_dome_link">
+    <inertial>
+      <mass value="0.8"/>
+      <origin xyz="0 0 0.04"/>
+      <inertia ixx="0.0015" iyy="0.0015" izz="0.0010" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <!-- Visual der Camera-Dome ist im chassis_link's combined visual enthalten.
+         Diese Link bleibt als Tf-Anchor für d435i / zedmini Sensor-Mounts. -->
+
+  </link>
+  <joint name="dome_mount_joint" type="fixed">
+    <parent link="chassis_link"/>
+    <child  link="camera_dome_link"/>
+    <!-- TODO[USD]: exact dome offset relative to chassis top -->
+    <origin xyz="0 0 0.36"/>
+  </joint>
+
+  <!-- camera frames are zero-mass tf-anchors; sensors will be attached
+       in the IsaacLab/Arena ArticulationCfg, not in the URDF -->
+  <link name="d435i_frame"/>
+  <joint name="d435i_mount_joint" type="fixed">
+    <parent link="camera_dome_link"/>
+    <child  link="d435i_frame"/>
+    <!-- TODO[USD]: confirm offsets within dome -->
+    <origin xyz="0.04 0.00 0.04"/>
+  </joint>
+
+  <link name="zedmini_frame"/>
+  <joint name="zedmini_mount_joint" type="fixed">
+    <parent link="camera_dome_link"/>
+    <child  link="zedmini_frame"/>
+    <origin xyz="0.00 0.00 0.06"/>
+  </joint>
+
+  <link name="d405_frame"/>
+  <joint name="d405_mount_joint" type="fixed">
+    <parent link="chassis_link"/>
+    <child  link="d405_frame"/>
+    <!-- front of robot, lower position (docking camera, EH Slide 6) -->
+    <!-- TODO[USD]: confirm offsets -->
+    <origin xyz="0.17 0.00 0.18"/>
+  </joint>
+
+</robot>
